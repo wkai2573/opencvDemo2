@@ -4,6 +4,7 @@ import android.Manifest.permission.*
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
+import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.util.Log
@@ -21,6 +22,11 @@ import org.opencv.objdetect.CascadeClassifier
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import org.opencv.android.CameraBridgeViewBase
+import org.opencv.core.Core.*
+import org.opencv.imgproc.Imgproc.resize
+import java.util.*
+
 
 private const val REQUEST_CODE_PERMISSIONS = 111
 private val REQUIRED_PERMISSIONS = arrayOf(CAMERA, WRITE_EXTERNAL_STORAGE, READ_EXTERNAL_STORAGE, RECORD_AUDIO, ACCESS_FINE_LOCATION)
@@ -29,7 +35,6 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 
 	private val viewFinder:JavaCamera2View by lazy { findViewById(R.id.cameraView) }
 	private val rotation_tv:TextView by lazy { findViewById(R.id.rotation_tv) }
-	lateinit var cvBaseLoaderCallback:BaseLoaderCallback
 
 	// image storage
 	lateinit var imageMat: Mat
@@ -39,7 +44,7 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 	var faceDetector: CascadeClassifier? = null
 	lateinit var faceDir:File
 	var imageRatio = 0.0 // scale down ratio
-
+	var screenRotation = 0
 
 	override fun onCreate(savedInstanceState:Bundle?) {
 		super.onCreate(savedInstanceState)
@@ -58,33 +63,29 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 		viewFinder.visibility = SurfaceView.VISIBLE
 		viewFinder.setCameraIndex(CameraCharacteristics.LENS_FACING_FRONT)
 		viewFinder.setCvCameraViewListener(this)
+		viewFinder.setCameraPermissionGranted() //新手機必須，否則黑屏
 
-		cvBaseLoaderCallback = object : BaseLoaderCallback(this) {
-			override fun onManagerConnected(status: Int) {
-				when (status) {
-					SUCCESS -> {
-						lgi(OPENCV_SUCCESSFUL)
-						loadFaceLib()
-						if (faceDetector!!.empty()) {
-							faceDetector = null
-						} else {
-							faceDir.delete()
-						}
-						viewFinder.enableView()
-					}
-					else -> super.onManagerConnected(status)
-				}
-			}
-		}
-
+		//方向事件監聽器
 		val mOrientationEventListener = object : OrientationEventListener(this) {
 			override fun onOrientationChanged(orientation:Int) {
 				//監控方向值以確定目標旋轉值 Monitors orientation values to determine the target rotation value
 				when (orientation) {
-					in 45..134 -> rotation_tv.text = getString(R.string.n_270_degree)
-					in 135..224 -> rotation_tv.text = getString(R.string.n_180_degree)
-					in 225..314 -> rotation_tv.text = getString(R.string.n_90_degree)
-					else -> rotation_tv.text = getString(R.string.n_0_degree)
+					in 45..134 -> {
+						rotation_tv.text = getString(R.string.n_270_degree)
+						screenRotation = 270
+					}
+					in 135..224 -> {
+						rotation_tv.text = getString(R.string.n_180_degree)
+						screenRotation = 180
+					}
+					in 225..314 -> {
+						rotation_tv.text = getString(R.string.n_90_degree)
+						screenRotation = 90
+					}
+					else -> {
+						rotation_tv.text = getString(R.string.n_0_degree)
+						screenRotation = 0
+					}
 				}
 			}
 		}
@@ -93,26 +94,29 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 		} else {
 			mOrientationEventListener.disable();
 		}
+
+		callFaceDetector()
 	}
 
-//	private fun callFaceDetector() {
-//		try {
-//			lgi(OPENCV_SUCCESSFUL)
-//
-//			loadFaceLib()
-//
-//			if (faceDetector!!.empty()) {
-//				faceDetector = null
-//			} else {
-//				faceDir.delete()
-//			}
-//			viewFinder.enableView()
-//		} catch (e:IOException) {
-//			lge(OPENCV_FAIL)
-//			shortMsg(this@MainActivity, OPENCV_FAIL)
-//			e.printStackTrace()
-//		}
-//	}
+	//調用人臉檢測器
+	private fun callFaceDetector() {
+		try {
+			lgi(OPENCV_SUCCESSFUL)
+
+			loadFaceLib()
+
+			if (faceDetector!!.empty()) {
+				faceDetector = null
+			} else {
+				faceDir.delete()
+			}
+			viewFinder.enableView()
+		} catch (e:IOException) {
+			lge(OPENCV_FAIL)
+			shortMsg(this@MainActivity, OPENCV_FAIL)
+			e.printStackTrace()
+		}
+	}
 
 	//加載人臉庫
 	private fun loadFaceLib() {
@@ -146,6 +150,125 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 		}
 	}
 
+	/** 繪製臉部矩形 Draw rectangle of the face:
+   * x: x-coor of upper corner
+   * y: y-coor of upper corner
+   * w: x-coor of opposite corner
+   * h: y-coor of opposite corner
+   * color: RGB
+   */
+	fun rectFace(x: Double, y: Double, w: Double, h: Double, color:Scalar) {
+		Imgproc.rectangle(
+			imageMat, // image
+			Point(x, y), // upper corner
+			Point(w, h),  // opposite corner
+			color  // RGB
+		)
+	}
+
+	/** 畫一個點 Draw a dot:
+   * x: x-coor of center
+   * y: y-coor of center
+   * color: RGB
+   */
+	fun drawDot(x: Double, y:Double, color:Scalar) {
+		Imgproc.circle(
+			imageMat, // image
+			Point(x, y),  // center
+			4, // radius
+			color, // RGB
+			-1, // thickness: -1 = filled in
+			8 // line type
+		)
+	}
+
+	//圖片縮小，並依據手機角度 調整圖片方向 以適應openCv偵測
+	fun get480Image(src: Mat): Mat {
+		val imageSize = Size(src.width().toDouble(), src.height().toDouble())
+		imageRatio = ratioTo480(imageSize)
+
+		// Downsize image
+		val dst = Mat()
+		val dstSize = Size(imageSize.width * imageRatio, imageSize.height * imageRatio)
+		resize(src, dst, dstSize)
+
+		//依據手機角度調整圖片 Check rotation
+		when (screenRotation) {
+			0 -> {
+				rotate(dst, dst, ROTATE_90_CLOCKWISE)
+				flip(dst, dst, 1) //水平翻轉
+			}
+			180 -> {
+				rotate(dst, dst, ROTATE_90_COUNTERCLOCKWISE)
+			}
+			270 -> {
+				flip(dst, dst, 0) //垂直翻轉
+			}
+		}
+		return dst
+	}
+
+	fun ratioTo480(size: Size):Double {
+		return 480 / kotlin.math.min(size.width, size.height)
+	}
+
+	//畫臉矩形
+	fun drawFaceRectangle() {
+		val faceRects = MatOfRect()
+		faceDetector!!.detectMultiScale(get480Image(grayMat), faceRects) //從圖片偵測人臉 取得人臉位置矩形
+
+		val scrW = imageMat.width().toDouble()
+		val scrH = imageMat.height().toDouble()
+
+		for (rect in faceRects.toArray()) {
+			var x = rect.x.toDouble()
+			var y = rect.y.toDouble()
+			var w = 0.0
+			var h = 0.0
+			var rw = rect.width.toDouble() // rectangle width
+			var rh = rect.height.toDouble() // rectangle height
+
+			if (imageRatio.equals(1.0)) {
+				w = x + rw
+				h = y + rh
+			} else {
+				x /= imageRatio
+				y /= imageRatio
+				rw /= imageRatio
+				rh /= imageRatio
+				w = x + rw
+				h = y + rh
+			}
+
+			//依手機角度 調整繪製位置
+			when (screenRotation) {
+				90 -> {
+					rectFace(x, y, w, h, RED)
+					drawDot(x, y, GREEN)
+				}
+				0 -> {
+					rectFace(y, x, h, w, RED)
+					drawDot(y, x, GREEN)
+				}
+				180 -> {
+					rectFace(y, x, h, w, RED)
+					drawDot(y, x, GREEN)
+					// fix height
+					val yFix = scrH - y + 150 //不知道是什麼，手機底部似乎多了一段距離，要加上高度約150
+					val hFix = yFix - rh
+					rectFace(yFix, x, hFix, w, YELLOW)
+					drawDot(yFix, x, BLUE)
+				}
+				270 -> {
+					val yFix = scrH - y
+					val hFix = yFix - rh
+					rectFace(x, yFix, w, hFix, RED)
+					drawDot(x, yFix, GREEN)
+				}
+			}
+		}
+	}
+
 	//檢查openCV
 	private fun checkOpenCV(context: Context) {
 		if (OpenCVLoader.initDebug()) {
@@ -153,40 +276,6 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 			lgd("OpenCV started...")
 		} else {
 			lge("OPENCV_PROBLEM")
-		}
-	}
-
-	//畫臉矩形
-	fun drawFaceRectangle() {
-		val faceRects = MatOfRect()
-		faceDetector!!.detectMultiScale(
-			grayMat,
-			faceRects)
-
-		for (rect in faceRects.toArray()) {
-			var x = 0.0
-			var y = 0.0
-			var w = 0.0
-			var h = 0.0
-
-			if (imageRatio.equals(1.0)) {
-				x = rect.x.toDouble()
-				y = rect.y.toDouble()
-				w = x + rect.width
-				h = y + rect.height
-			} else {
-				x = rect.x.toDouble() / imageRatio
-				y = rect.y.toDouble() / imageRatio
-				w = x + (rect.width / imageRatio)
-				h = y + (rect.height / imageRatio)
-			}
-
-			Imgproc.rectangle(
-				imageMat,
-				Point(x, y),
-				Point(w, h),
-				Scalar(255.0, 0.0, 0.0)
-			)
 		}
 	}
 
@@ -209,6 +298,12 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 		private const val FACE_DIR = "facelib"
 		private const val FACE_MODEL = "haarcascade_frontalface_alt2.xml"
 		private const val byteSize = 4096 // buffer size
+
+		// RGB
+		private val YELLOW = Scalar(255.0, 255.0, 0.0)
+		private val BLUE = Scalar(0.0, 0.0, 255.0)
+		private val RED = Scalar(255.0, 0.0, 0.0)
+		private val GREEN = Scalar(0.0, 255.0, 0.0)
 	}
 
 	/**
@@ -239,9 +334,9 @@ class MainActivity : AppCompatActivity(), CameraBridgeViewBase.CvCameraViewListe
 
 	override fun onResume() {
 		super.onResume()
-		OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION, this, cvBaseLoaderCallback)
-//		checkOpenCV(this)
-//		viewFinder?.let { viewFinder.enableView() }
+//		OpenCVLoader.initAsync(OpenCVLoader.OPENCV_VERSION, this, cvBaseLoaderCallback)
+		checkOpenCV(this)
+		viewFinder?.let { viewFinder.enableView() }
 	}
 
 	override fun onPause() {
