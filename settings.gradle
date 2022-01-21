@@ -1,0 +1,15 @@
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        jcenter() // Warning: this repository is going to shut down soon
+    }
+}
+rootProject.name = "opencvDemo2"
+include ':app'
+
+//導入openCv Module (用路徑導,更新比較方便,也可以在Project Structure>Dependencies 導入)
+def opencvsdk = 'C:/tools/OpenCV-android-sdk_4.5.5'
+include ':opencv'
+project(':opencv').projectDir = new File(opencvsdk + '/sdk')
